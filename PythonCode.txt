@@ -1,0 +1,320 @@
+#---------import---------------
+import RPi.GPIO as GPIO
+import time
+import spidev
+
+#--------Preamble-----------
+
+##-------GPIO to LCD Mapping-------
+LCD_RS = 17
+LCD_E = 18
+LCD_D4 = 25
+LCD_D5 = 24
+LCD_D6 = 23
+LCD_D7 = 22
+
+##-------LCD Device Constants-------
+LCD_WIDTH = 16
+LCD_CHR = True
+LCD_CMD = False
+LCD_LINE_1 = 0x80   #LCD RAM ADDRESS FOR THE FIRST LINE
+LCD_LINE_2 = 0xC0  #LCD RAM ADDRESS FOR THE SECOND LINE
+
+##---------LCD TIming Constraints-----
+E_PULSE = 0.0005
+E_DELAY = 0.0005
+
+##----------GPIO to RELAY Mapping----
+RELAY = 21
+
+##----------GPIO to BUZZER Mapping----
+BUZZER = 26
+
+##----------GPIO to BUZZER Mapping----
+WATER_AVAIL = 20
+
+##-----------GPIO to BUTTON for Manual Moisture Display-------
+BUTTON_MAN_DISP = 19
+
+##----------GPIO to UPKEY & DOWNKEY------------
+UPKEY = 5
+DOWNKEY = 6
+
+##--------CHECK INTERVAL---------------
+CHECK_INT = 5      # CHECK Interval of 5 seconds
+
+##---------SPI INITIALIZATION----------
+myspi=spidev.SpiDev()
+myspi.open(0,0)
+max_speed_hz = 32000000
+
+##----------MAX AND MINThreshold-------------
+MAX_TH_RES=717
+MIN_TH_RES=307
+
+##---------WELCOME MESSAGE--------
+KEY = True
+
+##--------MAIN PROGRAM BLOCK
+def main():
+  GPIO.setwarnings(False)               #disable warnings
+  GPIO.setmode(GPIO.BCM)           #setting up gpio as BCM numbering
+  
+  ##-----------SETTING CHANNELS AS OUTPUT-------------------
+  GPIO.setup(LCD_E, GPIO.OUT)    
+  GPIO.setup(LCD_RS, GPIO.OUT)
+  GPIO.setup(LCD_D4, GPIO.OUT)
+  GPIO.setup(LCD_D5, GPIO.OUT)
+  GPIO.setup(LCD_D6, GPIO.OUT)
+  GPIO.setup(LCD_D7, GPIO.OUT)
+  GPIO.setup(RELAY, GPIO.OUT)
+  GPIO.setup(BUZZER, GPIO.OUT)
+  
+  ##-------------SETTING CHANNEL AS INPUT---------------------------------
+  GPIO.setup(WATER_AVAIL,GPIO.IN,pull_up_down = GPIO.PUD_UP)
+  GPIO.setup(BUTTON_MAN_DISP,GPIO.IN,pull_up_down = GPIO.PUD_DOWN)
+  GPIO.setup(UPKEY,GPIO.IN,pull_up_down = GPIO.PUD_DOWN)
+  GPIO.setup(DOWNKEY,GPIO.IN,pull_up_down = GPIO.PUD_DOWN)
+  
+  
+  lcd_init()
+  global KEY,MIN_TH_RES,MAX_TH_RES
+  if KEY:
+    ##-----------------WELCOME MESSAGE---------------------
+    lcd_string("PROJECT BY",LCD_LINE_1)
+    lcd_string("KUNAL CHOUHAN",LCD_LINE_2)
+    time.sleep(2) # 3 seconds delay
+    lcd_string("SOIL MOISTURE ",LCD_LINE_1)
+    lcd_string("RASPBERRY PI",LCD_LINE_2)
+    time.sleep(2)
+    
+    KEY=False
+    
+  ##----------THREAD FOR CONCURRENT DETECTION OF DECREASE IN 
+  #            WATER MIN THRESHOLD LEVEL
+  GPIO.add_event_detect(WATER_AVAIL,GPIO.FALLING,callback=buzzFunction) 
+  
+  ##-----------THREAD FOR DETECTING BUTTON PRESS TO GET THE MOISTURE 
+  #             CONTENT AT ANY TIME
+  GPIO.add_event_detect(BUTTON_MAN_DISP,GPIO.RISING,callback=dispFunction)
+  
+  ##-----------THREAD FOR INCREMENTING THE LOWER THRESHOLD OF 
+  #             MOISTURE CONTENT
+  GPIO.add_event_detect(UPKEY,GPIO.RISING,callback=upkeyFunction)
+  
+   ##-----------THREAD FOR INCREMENTING THE UPPER THRESHOLD OF 
+  #             MOISTURE CONTENT
+  GPIO.add_event_detect(DOWNKEY,GPIO.RISING,callback=downkeyFunction)
+  
+  
+  while True:
+    lcd_byte(0x01,LCD_CMD)
+    resistance=adc()
+    display_moisture(resistance)
+    time.sleep(2)
+    lcd_byte(0x01,LCD_CMD)
+    
+    checkStatus(resistance)
+    
+    time.sleep(2)  # 5 seconds delay
+    lcd_byte(0x01,LCD_CMD)
+    while adc()<=MAX_TH_RES:
+      time.sleep(2)    
+
+##---------END OF MAIN()-------------------------------------
+
+
+ #--------------------CONVENIENCE FUNCTIONS FOR LCD-----------------------------
+  
+def lcd_init():
+  lcd_byte(0x33,LCD_CMD)  # Initialize
+  lcd_byte(0x32,LCD_CMD)  # Initialize
+  lcd_byte(0x06,LCD_CMD)  # Increment Cursor
+  lcd_byte(0x0C,LCD_CMD) # Display ON, Cursor OFF, Blink OFF
+  lcd_byte(0x28,LCD_CMD) # 4-bit mode
+  lcd_byte(0x01,LCD_CMD) # Clear Display
+  time.sleep(E_DELAY)
+
+##----------LCD BYTE TRANSFER-----
+
+def lcd_byte(bits, mode):
+   ###Send byte to data pins
+   ###mode=True for character
+   ###            False for cammand
+	
+  GPIO.output(LCD_RS, mode) # RS
+	
+   ###---HIGH BITS---
+	
+  GPIO.output(LCD_D4, False)
+  GPIO.output(LCD_D5, False)
+  GPIO.output(LCD_D6, False)
+  GPIO.output(LCD_D7, False)
+	
+  if bits&0x10==0x10:
+    GPIO.output(LCD_D4, True)
+  if bits&0x20==0x20:
+    GPIO.output(LCD_D5, True)
+  if bits&0x40==0x40:
+     GPIO.output(LCD_D6, True)
+  if bits&0x80==0x80:
+     GPIO.output(LCD_D7, True)
+	
+   ###----Toggle 'ENABLE' Pin
+  lcd_toggle_enable()
+
+   ###-----LOW BITS-----
+
+  GPIO.output(LCD_D4, False)
+  GPIO.output(LCD_D5, False)
+  GPIO.output(LCD_D6, False)
+  GPIO.output(LCD_D7, False)
+	
+  if bits&0x01==0x01:
+    GPIO.output(LCD_D4,True)
+  if bits&0x02==0x02:
+    GPIO.output(LCD_D5,True)
+  if bits&0x04==0x04:
+    GPIO.output(LCD_D6,True)
+  if bits&0x08==0x08:
+    GPIO.output(LCD_D7,True)
+  
+  lcd_toggle_enable()
+
+##----------Toggle Enable--------
+def lcd_toggle_enable():
+  time.sleep(E_DELAY)
+  GPIO.output(LCD_E, True)
+  time.sleep(E_PULSE)
+  GPIO.output(LCD_E, False)
+  time.sleep(E_DELAY)
+
+##------------SEND STRING TO DISPLAY-----
+def lcd_string(message,line):
+  message=message.ljust(LCD_WIDTH," ")
+  lcd_byte(line,LCD_CMD)
+
+  for i in range(LCD_WIDTH):
+    lcd_byte(ord(message[i]),LCD_CHR)
+    
+#-------------END OF FUNCTIONS FOR LCD----------------
+
+##-------------CHECK STATUS OF SOIL DRY,MOIST,WET--------------
+#               AND DO NEEDFUL ACTION
+
+def checkStatus(resistance):
+  if resistance>=MAX_TH_RES:
+    lcd_string("DRY SOIL",LCD_LINE_1)
+    time.sleep(1)
+    if GPIO.input(WATER_AVAIL) == GPIO.LOW :
+      buzzFunction()
+    lcd_string("PUMP: ON",LCD_LINE_2)
+    pump_control()
+    lcd_byte(0x01,LCD_CMD)
+    lcd_string("WATERED:MOISTURE",LCD_LINE_1)
+    lcd_string("        RESTORED",LCD_LINE_2)
+    
+  if MIN_TH_RES<resistance<MAX_TH_RES:
+    lcd_string("MOIST SOIL",LCD_LINE_1)
+  if resistance<=MIN_TH_RES:
+    lcd_string("WET SOIL",LCD_LINE_1)
+  
+
+##-----------FUNCTION TO CONVERT ANALOG TO DIGITAL---------------------
+def adc():
+  value = myspi.xfer2([1,128,0])
+  moisture=((value[1]&3)<<8)+value[2]
+  return moisture
+  
+  
+ ##------------FUNCTION TO DISPLAY MOISTURE % ON LCD
+def display_moisture(resistance):
+  moisture=1023-resistance
+  per=round((moisture/1023)*100)
+  answer=str(per)+"%"
+  lcd_byte(0x01,LCD_CMD)
+  lcd_string("SOIL MOISTURE:",LCD_LINE_1)
+  lcd_string(answer,LCD_LINE_2)
+ 
+##---------------FUNCTION TO CONTROL PUMP-------------------------  
+def pump_control():
+  GPIO.output(RELAY,GPIO.HIGH)
+  while adc()>300:
+    time.sleep(1)
+  GPIO.output(RELAY,GPIO.LOW)
+  
+##------------CALLBACK FUNCTION WHEN THERE IS DECREASE IN WATER LEVEL-------
+##             AND OPERTE THE BUZZER 
+def buzzFunction() :
+  GPIO.output(RELAY,GPIO.LOW)
+  GPIO.output(BUZZER,GPIO.HIGH)
+  lcd_byte(0x01, LCD_CMD)
+  lcd_string("NO WATER",LCD_LINE_1)
+  lcd_string("FILL TANK",LCD_LINE_2)
+  time.sleep(2)
+  while GPIO.input(WATER_AVAIL) == GPIO.LOW :
+    GPIO.output(RELAY,GPIO.LOW)
+    GPIO.output(BUZZER,GPIO.HIGH)
+    
+  GPIO.output(BUZZER,GPIO.LOW)
+  lcd_byte(0x01, LCD_CMD)
+  lcd_string("WATER RESTORED",LCD_LINE_1)
+  lcd_string("PROCESS RESTART",LCD_LINE_2)
+  time.sleep(2)
+  main()
+ 
+##------------CALLBACK FUNCTION WHEN USER PRESSES BUTTON FOR -------------------------- 
+#              MANUAL DETECTION OF SOIL MOISTURE
+def dispFunction():
+  resistance=adc()
+  display_moisture(resistance)
+  time.sleep(1)
+  lcd_byte(0x01,LCD_CMD)
+  checkStatus(resistance)
+  time.sleep(1)
+  lcd_byte(0x01,LCD_CMD)
+
+##---------------CALLBACK FUNCTION WHEN USER PRESSES UPKEY---------------------
+##                TO INCREMENT LOWER THRESHOLD MOISTURE LEVEL  
+def upkeyFunction():
+  global MAX_TH_RES
+  moisture_value=1023-MAX_TH_RES
+  percent=round((moisture_value/1023)*100)
+  if percent<70:
+    percent=percent+1
+  moisture_value=(percent/100)*1023
+  MAX_TH_RES=1023-moisture_value
+  answer="LEVEL SET TO "+str(percent)+"%"
+  lcd_byte(0x01,LCD_CMD)
+  lcd_string("MIN MOISTURE",LCD_LINE_1)
+  lcd_string(answer,LCD_LINE_2)
+  time.sleep(2)
+  lcd_byte(0x01,LCD_CMD)
+
+##---------------CALLBACK FUNCTION WHEN USER PRESSES DOWNKEY---------------------
+##                TO DECREMENT LOWER THRESHOLD MOISTURE LEVEL    
+def downkeyFunction():
+  global MAX_TH_RES
+  moisture_value=1023-MAX_TH_RES
+  percent=round((moisture_value/1023)*100)
+  if percent>0:
+    percent=percent-1
+  moisture_value=(percent/100)*1023
+  MAX_TH_RES=1023-moisture_value
+  answer="LEVEL SET TO "+str(percent)+"%"
+  lcd_byte(0x01,LCD_CMD)
+  lcd_string("MIN MOISTURE",LCD_LINE_1)
+  lcd_string(answer,LCD_LINE_2)
+  time.sleep(2)
+  lcd_byte(0x01,LCD_CMD)
+  
+  
+if __name__ == '__main__':
+ 
+  try:
+    KEY=1
+    main()
+  except KeyboardInterrupt:
+    pass
+  finally:
+    GPIO.cleanup()
